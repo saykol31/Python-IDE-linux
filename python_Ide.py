@@ -21,19 +21,20 @@ import importlib.metadata
 
 
 
-# Rutas
-#venv_python = sys.executable  # Siempre apunta al Python que ejecuta la IDE
-DB_PATH = "pip_packages.db"
-REQUIREMENTS_FILE = "requirements.txt"
-VENV_DIR = "venv"  # nombre de tu entorno virtual
-venv_python = "/home/saykol/PYTHON/venv/bin/python3"
-RUTA = "/home/saykol/PYTHON"
-pip_path = os.path.join(RUTA, "venv/bin/pip")
+# Rutas portátiles del proyecto
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-RUTA_BASE = "/home/saykol/PYTHON/mantenimiento/"
-PYTHONPATH_GRAPH = "/home/saykol/PYTHON/dibujo/Graph_lib"
-# Ruta al intérprete del entorno virtual
+DB_PATH = os.path.join(PROJECT_DIR, "pip_packages.db")
+REQUIREMENTS_FILE = os.path.join(PROJECT_DIR, "requirements.txt")
+LOCK_FILE = os.path.join(PROJECT_DIR, "requirements-lock.txt")
+VENV_DIR = os.path.join(PROJECT_DIR, "venv")
 
+if sys.platform == "win32":
+    venv_python = os.path.join(VENV_DIR, "Scripts", "python.exe")
+else:
+    venv_python = os.path.join(VENV_DIR, "bin", "python")
+
+RUTA = PROJECT_DIR
 
 
 ultimo_archivo = None
@@ -270,9 +271,6 @@ def limpiar_area():
 # --- Configuración ---
 #####################
 
-DB_PATH = "pip_packages.db"
-VENV_DIR = "venv"
-REQUIREMENTS_FILE = "requirements.txt"
 consola = None  # Se asigna desde el IDE
 
 # Categorías de paquetes
@@ -324,42 +322,89 @@ def add_packages_to_db(packages):
 
 def load_packages_from_db():
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT name, version FROM packages")
-    rows = cursor.fetchall()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name, version FROM packages ORDER BY name COLLATE NOCASE"
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
 
     paquetes = {}
     for name, version in rows:
-        if version:
-             paquetes[name.lower()] = version
-        else:
-             paquetes[name.lower()] = ""
-        return [f"{n}=={v}" if v else n for n, v in paquetes.items()]
+        paquetes[name.lower()] = version or ""
 
-        # Si hay duplicados con distintas versiones, quedarse con la última
-        paquetes[name.lower()] = version
-    return [f"{name}=={version}" for name, version in paquetes.items()]
+    return [
+        f"{name}=={version}" if version else name
+        for name, version in paquetes.items()
+    ]
 
 
 # -------------------------
 # SINCRONIZAR VENV -> DB
 # -------------------------
-
 def sync_installed_pip_to_db(pip_path):
-    result = subprocess.run([pip_path, "freeze"], capture_output=True, text=True)
-    if result.stdout:
-        paquetes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        add_packages_to_db(paquetes)
-        log_consola("✅ Paquetes actuales del venv sincronizados con la DB.", "green")
+    try:
+        result = subprocess.run(
+            [pip_path, "freeze"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode != 0:
+            log_consola(
+                "❌ No se pudo obtener la lista de paquetes del venv. "
+                "La DB no se modificó.",
+                "red"
+            )
+            return False
+
+        paquetes = [
+            linea.strip()
+            for linea in result.stdout.splitlines()
+            if linea.strip() and not linea.startswith("#")
+        ]
+
+        registros = []
+        for paquete in paquetes:
+            if "==" in paquete:
+                nombre, version = paquete.split("==", 1)
+                registros.append(
+                    (nombre.lower().strip(), version.strip())
+                )
+
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM packages")
+            cursor.executemany(
+                """
+                INSERT OR REPLACE INTO packages (name, version)
+                VALUES (?, ?)
+                """,
+                registros
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        log_consola(
+            f"✅ DB sincronizada: {len(registros)} paquetes instalados.",
+            "green"
+        )
+        return True
+
+    except Exception as e:
+        log_consola(f"❌ Error sincronizando la DB: {e}", "red")
+        return False
 
 #########################
 # --- Funciones PyPI ---
 #########################
 
 def get_paquetes_instalados():
-    import importlib.metadata
     return {dist.metadata['Name'].lower(): dist.version for dist in importlib.metadata.distributions()}
 
 def get_paquetes_desactualizados(pip_path):
@@ -375,11 +420,31 @@ def get_paquetes_desactualizados(pip_path):
     return desactualizados
 
 def generar_requirements(pip_path):
-    result = subprocess.run([pip_path, "freeze"], capture_output=True, text=True)
-    if result.stdout:
-        with open(REQUIREMENTS_FILE, "w") as f:
+    """Guardar el inventario completo sin sobrescribir requirements.txt."""
+    try:
+        result = subprocess.run(
+            [pip_path, "freeze"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode != 0:
+            log_consola(
+                "ERROR: no se pudo generar el inventario del entorno.",
+                "red"
+            )
+            return False
+
+        with open(LOCK_FILE, "w", encoding="utf-8") as f:
             f.write(result.stdout)
-        log_consola(f"✅ {REQUIREMENTS_FILE} generado.", "green")
+
+        log_consola(f"Inventario completo guardado en {LOCK_FILE}.", "green")
+        return True
+
+    except Exception as e:
+        log_consola(f"Error generando inventario: {e}", "red")
+        return False
 
 #########################
 # --- Consola IDE ---
@@ -420,54 +485,76 @@ def ejecutar_comando(comando):
 #########################
 
 def _actualizar_venv_completo():
-    log_consola("♻ Iniciando actualización del venv...", "cyan")
+    log_consola("Iniciando actualización del entorno virtual...", "cyan")
 
-    # Validar venv
-    pip_path_local = os.path.join(VENV_DIR, "Scripts", "pip.exe") if sys.platform == "win32" else os.path.join(VENV_DIR, "bin", "pip")
+    pip_path_local = (
+        os.path.join(VENV_DIR, "Scripts", "pip.exe")
+        if sys.platform == "win32"
+        else os.path.join(VENV_DIR, "bin", "pip")
+    )
+
     if not os.path.isfile(pip_path_local):
         log_consola(f"No se encontró pip en el venv: {pip_path_local}", "red")
         return
 
-    # Inicializar DB
     init_db()
-    log_consola("📂 Base de datos de paquetes inicializada.", "cyan")
 
-    # Sincronizar pip actual con DB
+    # La DB registra el inventario; no se utiliza para instalarlo entero.
     sync_installed_pip_to_db(pip_path_local)
 
-    # Actualizar paquetes por categorías
-    instalados = get_paquetes_instalados()
-    desactualizados = get_paquetes_desactualizados(pip_path_local)
-
-    for nombre_categoria, paquetes in CATEGORIAS.items():
-        para_instalar = [p for p in paquetes if p.lower() not in instalados]
-        para_actualizar = [p for p in paquetes if p.lower() in desactualizados]
-
-        if para_instalar:
-            log_consola(f"Paquetes de {nombre_categoria} para instalar: {para_instalar}", "yellow")
-            ejecutar_comando([pip_path_local, "install"] + para_instalar)
-
-        if para_actualizar:
-            log_consola(f"Paquetes de {nombre_categoria} para actualizar: {para_actualizar}", "cyan")
-            ejecutar_comando([pip_path_local, "install", "--upgrade"] + para_actualizar)
-
-    # Procesar requirements.txt
-    if os.path.isfile(REQUIREMENTS_FILE):
-        log_consola(f"📄 Procesando {REQUIREMENTS_FILE}...", "yellow")
-        with open(REQUIREMENTS_FILE, "r") as f:
-            nuevos_paquetes = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-        add_packages_to_db(nuevos_paquetes)
-        ejecutar_comando([pip_path_local, "install", "--upgrade"] + load_packages_from_db())
-        log_consola("✅ Todos los paquetes actualizados.", "green")
+    # Instalar únicamente las dependencias declaradas por el usuario.
+    if not os.path.isfile(REQUIREMENTS_FILE):
+        log_consola(
+            f"No existe {REQUIREMENTS_FILE}; se omite la instalación de extras.",
+            "yellow"
+        )
     else:
-        log_consola(f"No se encontró {REQUIREMENTS_FILE}. Se omite esta parte.", "yellow")
+        with open(REQUIREMENTS_FILE, "r", encoding="utf-8") as f:
+            lineas = [
+                linea.strip()
+                for linea in f
+                if linea.strip() and not linea.lstrip().startswith("#")
+            ]
 
-    # Re-sincronizar DB con el estado final del venv
-    sync_installed_pip_to_db(pip_path_local)
+        if lineas:
+            log_consola(
+                f"Instalando {len(lineas)} dependencias declaradas por el usuario...",
+                "cyan"
+            )
+            result = subprocess.run(
+                [pip_path_local, "install", "--upgrade", "-r", REQUIREMENTS_FILE],
+                capture_output=True,
+                text=True,
+                check=False
+            )
 
-    # Regenerar requirements.txt actualizado
-    generar_requirements(pip_path_local)
-    log_consola("♻ Actualización del venv completada.", "cyan")
+            for linea in result.stdout.splitlines():
+                log_consola(linea, "green")
+            for linea in result.stderr.splitlines():
+                log_consola(linea, "red")
+
+            if result.returncode != 0:
+                log_consola(
+                    "La instalación de dependencias falló. Revisa los mensajes anteriores.",
+                    "red"
+                )
+                return
+        else:
+            log_consola(
+                "No hay dependencias adicionales seleccionadas; no se instalarán categorías automáticamente.",
+                "yellow"
+            )
+
+    # Actualizar el inventario, sin convertirlo en una lista de órdenes.
+    if not sync_installed_pip_to_db(pip_path_local):
+        log_consola("No se pudo sincronizar la base de datos.", "red")
+        return
+
+    if not generar_requirements(pip_path_local):
+        log_consola("No se pudo guardar el inventario del entorno.", "red")
+        return
+
+    log_consola("Actualización del entorno completada.", "cyan")
 
 def actualizar_venv_completo():
     threading.Thread(target=_actualizar_venv_completo, daemon=True).start()
@@ -586,49 +673,11 @@ def listar_db():
 
 # --- FUNCIONES ESPECIALES---
 
-def ejecutar_script(script):
-    ruta_completa = os.path.join(RUTA_BASE, script)
-    if script == "repotest.sh":
-        if not messagebox.askyesno("Confirmación",
-                                   "⚠️ Este script moverá y restaurará repositorios.\n¿Seguro que quieres continuar?"):
-            return
-    try:
-        if script.endswith(".py"):
-            subprocess.Popen([venv_python, ruta_completa])
-        elif script.endswith(".sh"):
-            subprocess.Popen(['konsole', '--noclose', '-e', ruta_completa])
 
-        else:
-            messagebox.showerror("Error", f"Tipo de archivo no soportado: {script}")
-            return
-        messagebox.showinfo("Ejecutando", f"Se abrió konsole para {script}.")
-    except Exception as e:
-        messagebox.showerror("Error", f"No se pudo ejecutar {script}.\n{e}")
-
-def exportar_pythonpath():
-    comando = f'export PYTHONPATH=$PYTHONPATH:{PYTHONPATH_GRAPH}; echo "PYTHONPATH exportado correctamente"; exec bash'
-    subprocess.Popen(['konsole', '--noclose', '-e', 'bash', '-c', comando])
-    messagebox.showinfo("PYTHONPATH", "Variable PYTHONPATH exportada en Konsole.")
-
-def compilar_cpp():
-    comando = (
-        f'export PYTHONPATH=$PYTHONPATH:{PYTHONPATH_GRAPH} && '
-        f'cd {PYTHONPATH_GRAPH} && '
-        'c++ main.cpp -o main -O2 -std=c++17 $(python3 -m pybind11 --includes) -lpython3.11 && '
-        'echo "✅ Compilación completada"; exec bash'
-    )
-    subprocess.Popen(['konsole', '--noclose', '-e', 'bash', '-c', comando])
-    messagebox.showinfo("Compilación", f"Se abrió Konsole para compilar main.cpp en {PYTHONPATH_GRAPH}.")
-
-
-# Fuente global para botones
+# --- BARRA SUPERIOR ---
 FUENTE_BOTONES = ("Segoe UI", 10, "bold")
 FUENTE_BOTONES1 = ("Courier", 10, "bold")
 FUENTE_BOTONES2 = ("Courier", 10, "bold")
-
-
-
-# --- FRAME SUPERIOR ---
 
 frame_superior = tk.Frame(root, bg="#E6E6FA")
 frame_superior.pack(side="top", fill="x", pady=5)
@@ -654,19 +703,13 @@ btn_clear.pack(side="left", padx=5)
 btn_update = tk.Button(frame_superior, text="UPDATE", command=actualizar_venv_completo, bg="#4682B4", fg="white", font=FUENTE_BOTONES)
 btn_update.pack(side="left", padx=5)
 
-btn_ejecutar = tk.Button(frame_superior, text="PLAY", command=ejecutar_archivo,  bg=COLORES["VERDE"], fg="white", font=FUENTE_BOTONES)
+btn_ejecutar = tk.Button(frame_superior, text="PLAY", command=ejecutar_archivo, bg=COLORES["VERDE"], fg="white", font=FUENTE_BOTONES)
 btn_ejecutar.pack(side="left", padx=5)
 
 btn_exit = tk.Button(frame_superior, text="EXIT", command=root.destroy, bg=COLOR_ROJO, fg="white", font=FUENTE_BOTONES)
 btn_exit.pack(side="left", padx=5)
 
 
-
-
-###################   EDITOR  #######################
-
-
-# --- identado   ---
 def auto_indent_python(event):
     line = editor.get("insert linestart", "insert")
     indent = ""
@@ -914,60 +957,6 @@ for texto,comando, color, icono_nombre in botones_inferior:
 
 
 
-# --- POPUP MENU ---
-popup_menu = tk.Menu(root, tearoff=0, bg="white", fg="black",
-                     font=("Arial", 10))
-
-# Lista de opciones
-opciones_menu = [
-    ("Actualizar entorno", "actualizarentorno.py"),
-    ("Temperatura", "temperatura.py"),
-    ("Monitores", "pantallas.py"),
-    ("Bateria", "bateria.py"),
-    ("Perifericos", "perifericos.py"),
-    ("HARDWARE", "hardware.py"),
-    ("BUSES Y PUERTOS", "busesypuertos.py"),
-    ("Actualizar sistema", "my_updater.py"),
-    ("Paquetes Rotos", "paquetesrotos.py"),
-    ("Probar Repositorios Rotos", "repotest.sh"),
-    ("Limpiar temporales", "limpiar_temporales.py"),
-    ("Vaciar papelera", "vaciar_papelera.py"),
-    ("Limpiar caché DNS", "limpiar_dns.py"),
-    ("Reiniciar red", "reiniciar_red.py"),
-    ("Restaurar DNS", "restaurar_dns.py"),
-]
-
-# Añadir opciones al popup
-for texto, script in opciones_menu:
-    popup_menu.add_command(label=texto,
-                           command=lambda s=script: ejecutar_script(s))
-
-# --- BOTÓN MENU ---
-def mostrar_menu(event=None):
-    # Obtener posición del botón
-    x = menu_boton.winfo_rootx()
-    y = menu_boton.winfo_rooty()
-    # Mostrar el menú justo encima del botón (desplegable hacia arriba)
-    popup_menu.tk_popup(x, y - popup_menu.winfo_reqheight())
-
-menu_boton = tk.Button(frame_inferior, text="MENU",
-                       bg="#DAA520", fg="black",
-                       font=("Arial", 10, "bold"),
-                       relief="raised", bd=3,
-                       activebackground="#FFD700",
-                       command=mostrar_menu)
-menu_boton.pack(side="left", padx=5, pady=5)
-
-
-
-
-# --- BOTONES EXTRA ---
-
-btn_export = tk.Button(frame_inferior, text="Exportar PYTHONPATH", command=exportar_pythonpath)
-btn_export.pack(side="left", padx=5)
-
-btn_compilar = tk.Button(frame_inferior, text="Compilar main.cpp", command=compilar_cpp)
-btn_compilar.pack(side="left", padx=5)
 
 
 #----------------------------------
@@ -1008,7 +997,7 @@ historial = []
 indice_historial = -1
 stdin_queue = queue.Queue()
 ultimo_archivo = None  # Aquí se guarda el archivo actual a ejecutar
-venv_python = sys.executable  # Ajusta a tu venv si es otro
+
 
 # --- Función para imprimir en consola ---
 def print_consola(mensaje, color=None):
@@ -1172,7 +1161,7 @@ for line in banner_lines:
     print_consola(line.center(60), "verde")
 
 # Obtener la carpeta del venv (normalmente la carpeta padre de bin/python)
-ubicacion_venv = os.path.dirname(os.path.dirname(sys.executable))
+ubicacion_venv = VENV_DIR
 
 # Mensaje de activación (cyan / lila)
 mensaje_lines = [

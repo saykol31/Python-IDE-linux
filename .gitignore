@@ -13,3 +13,15 @@ requirements.txt
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Inventario local del entorno
+requirements-lock.txt
+
+# Copias de seguridad locales
+python_Ide.py.antes_*
+python_Ide.py.bak
+requirements.txt.antes_*
+
+# Archivos temporales de editores
+*~
+*.swp
