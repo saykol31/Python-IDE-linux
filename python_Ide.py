@@ -621,18 +621,29 @@ def crear_externo():
 
 # --- Función para abrir PyCharm ---
 def pycharm():
+    pycharm_sh = "/opt/pycharm/bin/pycharm.sh"
+
+    if not os.path.isfile(pycharm_sh):
+        messagebox.showwarning(
+            "PyCharm",
+            "No se encontró PyCharm en /opt/pycharm/bin/pycharm.sh.\n"
+            "Puedes seguir utilizando la IDE sin instalarlo."
+        )
+        return
+
     try:
-        # Intentar ejecutar PyCharm
-        subprocess.Popen(["/opt/pycharm/bin/pycharm.sh"])
-        # Limpiar consola integrada
+        subprocess.Popen([pycharm_sh])
+
         consola.config(state="normal")
         consola.delete("1.0", tk.END)
         consola.insert(tk.END, "✅ PyCharm se ha abierto correctamente.\n", "verde")
         consola.config(state="disabled")
+
     except Exception as e:
-        consola.config(state="normal")
-        consola.insert(tk.END, f"❌ Error al abrir PyCharm: {e}\n")
-        consola.config(state="disabled")
+        messagebox.showwarning(
+            "PyCharm",
+            f"No se pudo abrir PyCharm:\n{e}"
+        )
 
 
 
