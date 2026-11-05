@@ -136,7 +136,8 @@ COLORES = {
 root = tk.Tk()
 frame_consola = tk.Frame(root)
 root.title("IDE Python v.4.1")
-root.geometry("900x850")
+alto = min(850, root.winfo_screenheight() - 120)
+root.geometry(f"900x{alto}")
 root.config(bg="#E6E6FA")
 
 
