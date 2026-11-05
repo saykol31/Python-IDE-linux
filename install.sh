@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -9,22 +8,36 @@ echo "==============================================="
 echo "          INSTALADOR DE PYTHON IDE"
 echo "==============================================="
 
-# Comprobar los requisitos del sistema.
+# Comprobar Python 3.
 command -v python3 >/dev/null 2>&1 || {
     echo "Error: no se encontró Python 3."
     exit 1
 }
 
+# Comprobar las dependencias del sistema y, si falta alguna,
+# instalarla aquí mismo (solo pedirá la contraseña de sudo).
+faltan=()
+python3 -c 'import tkinter' 2>/dev/null || faltan+=("python3-tk")
+python3 -c 'import ensurepip' 2>/dev/null || faltan+=("python3-venv")
+
+if (( ${#faltan[@]} > 0 )); then
+    echo "Faltan paquetes del sistema: ${faltan[*]}"
+    echo "Instalándolos ahora (puede pedir tu contraseña)..."
+    sudo apt-get install -y "${faltan[@]}" || {
+        sudo apt-get update && sudo apt-get install -y "${faltan[@]}"
+    } || {
+        echo "Error: no se pudieron instalar: ${faltan[*]}"
+        exit 1
+    }
+fi
+
+# Reverificar: sin Tkinter o sin ensurepip no se puede seguir.
 python3 -c 'import tkinter' 2>/dev/null || {
-    echo "Falta Tkinter. En Debian/MX Linux ejecuta:"
-    echo "sudo apt install python3-tk"
+    echo "Error: sigue faltando Tkinter (python3-tk)."
     exit 1
 }
-
-python3 -m venv --help >/dev/null 2>&1 || {
-    echo "Falta el soporte para entornos virtuales."
-    echo "En Debian/MX Linux ejecuta:"
-    echo "sudo apt install python3-venv"
+python3 -c 'import ensurepip' 2>/dev/null || {
+    echo "Error: sigue faltando el soporte de entornos virtuales (python3-venv)."
     exit 1
 }
 
@@ -37,11 +50,31 @@ for archivo in python_Ide.py ejecutar.sh python.png requirements-ide.txt; do
 done
 
 chmod +x "$SCRIPT_DIR/ejecutar.sh"
+chmod +x "$SCRIPT_DIR/activar_venv.sh" 2>/dev/null || true
+chmod +x "$SCRIPT_DIR/StartPy.sh" 2>/dev/null || true
+
+# El entorno solo es válido si tiene activate y un pip que responde.
+# Una creación interrumpida deja un venv a medias (python sin pip):
+# ese se borra y se recrea, nunca se reutiliza.
+venv_sano() {
+    [[ -x "$VENV_DIR/bin/python" && -f "$VENV_DIR/bin/activate" ]] \
+        && "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1
+}
+
+if [[ -e "$VENV_DIR" ]] && ! venv_sano; then
+    echo "Entorno virtual incompleto detectado: se recrea desde cero."
+    rm -rf "$VENV_DIR"
+fi
 
 # Crear el entorno propio del proyecto si no existe.
-if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+if [[ ! -e "$VENV_DIR" ]]; then
     python3 -m venv "$VENV_DIR"
 fi
+
+venv_sano || {
+    echo "Error: el entorno virtual quedó sin pip utilizable."
+    exit 1
+}
 
 # Instalar o comprobar las dependencias.
 "$VENV_DIR/bin/python" -m pip install \
