@@ -1124,8 +1124,16 @@ def enviar_comando(event=None):
         print_consola("> " + entrada, "cyan")
         return
 
-    # --- Comando externo ---
+    # --- Comando externo (dentro del venv) ---
     try:
+        env_venv = os.environ.copy()
+        if sys.platform == "win32":
+            carpeta_bin_venv = os.path.join(VENV_DIR, "Scripts")
+        else:
+            carpeta_bin_venv = os.path.join(VENV_DIR, "bin")
+        env_venv["VIRTUAL_ENV"] = VENV_DIR
+        env_venv["PATH"] = carpeta_bin_venv + os.pathsep + env_venv.get("PATH", "")
+        env_venv.pop("PYTHONHOME", None)
         proceso_activo = subprocess.Popen(
             entrada,
             shell=True,
@@ -1133,7 +1141,8 @@ def enviar_comando(event=None):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            bufsize=1
+            bufsize=1,
+            env=env_venv
         )
         threading.Thread(target=leer_salida, args=(proceso_activo,), daemon=True).start()
         threading.Thread(target=leer_error, args=(proceso_activo,), daemon=True).start()
